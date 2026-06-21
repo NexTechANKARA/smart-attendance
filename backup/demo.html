@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Smart Attendance — Face Recognition Demo</title>
+<style>
+  :root { --bg:#0f1320; --card:#1a2133; --line:#2a3450; --text:#e8edf7;
+          --muted:#8a96b3; --accent:#4f8cff; --ok:#2ecc71; --warn:#f1c40f; --bad:#e74c3c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, "Segoe UI", sans-serif; background:var(--bg);
+         color:var(--text); display:flex; justify-content:center; padding:24px; }
+  .wrap { width:100%; max-width:880px; }
+  h1 { font-size:22px; margin:0 0 2px; }
+  .sub { color:var(--muted); font-size:13px; margin-bottom:18px; }
+  .grid { display:grid; grid-template-columns: 1.1fr 1fr; gap:16px; }
+  @media (max-width:760px){ .grid{ grid-template-columns:1fr; } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:16px; }
+  .card h2 { font-size:14px; margin:0 0 12px; color:var(--muted); text-transform:uppercase; letter-spacing:.5px; }
+  video, canvas { width:100%; border-radius:10px; background:#000; display:block; }
+  .row { display:flex; gap:8px; margin-top:10px; flex-wrap:wrap; }
+  input { flex:1; min-width:120px; padding:10px 12px; border-radius:8px; border:1px solid var(--line);
+          background:#0d1220; color:var(--text); font-size:14px; }
+  button { padding:10px 14px; border:0; border-radius:8px; font-size:14px; font-weight:600;
+           cursor:pointer; background:var(--accent); color:#fff; }
+  button.secondary { background:#2a3450; }
+  button:active { transform: translateY(1px); }
+  #result { margin-top:14px; padding:16px; border-radius:10px; background:#0d1220;
+            border:1px solid var(--line); text-align:center; }
+  #resultName { font-size:30px; font-weight:800; margin:4px 0; }
+  #resultMeta { color:var(--muted); font-size:13px; }
+  .pill { display:inline-block; padding:3px 10px; border-radius:999px; font-size:12px; font-weight:700; }
+  .people { list-style:none; padding:0; margin:8px 0 0; }
+  .people li { display:flex; justify-content:space-between; align-items:center;
+               padding:8px 10px; border:1px solid var(--line); border-radius:8px; margin-bottom:6px; font-size:14px; }
+  .people .del { background:transparent; color:var(--bad); font-size:12px; padding:2px 6px; }
+  .hint { color:var(--muted); font-size:12px; margin-top:8px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Smart Attendance — Face Recognition</h1>
+  <div class="sub">Local demo · model runs on-device · service: <span id="svc"></span></div>
+
+  <div class="grid">
+    <!-- LEFT: camera + actions -->
+    <div class="card">
+      <h2>Camera</h2>
+      <video id="video" autoplay playsinline muted></video>
+      <canvas id="canvas" style="display:none"></canvas>
+
+      <div class="row">
+        <input id="personId" placeholder="Enter name / ID to enroll" />
+        <button onclick="enroll()">Enroll this face</button>
+      </div>
+      <div class="row">
+        <button class="secondary" style="flex:1" onclick="recognize()">● Check in (recognize)</button>
+      </div>
+      <div class="hint">Tip: enroll a couple of people first, then check in.</div>
+    </div>
+
+    <!-- RIGHT: result + enrolled list -->
+    <div class="card">
+      <h2>Result</h2>
+      <div id="result">
+        <div class="pill" id="resultPill" style="background:#2a3450">idle</div>
+        <div id="resultName">—</div>
+        <div id="resultMeta">Click “Check in” to recognize the face in view.</div>
+      </div>
+
+      <h2 style="margin-top:18px">Enrolled people (<span id="count">0</span>)</h2>
+      <ul class="people" id="people"></ul>
+    </div>
+  </div>
+</div>
+
+<script>
+  // Point this at the running FastAPI service.
+  const API = "http://127.0.0.1:8088";
+  document.getElementById("svc").textContent = API;
+
+  const video = document.getElementById("video");
+  const canvas = document.getElementById("canvas");
+
+  // Start webcam
+  navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480 } })
+    .then(s => video.srcObject = s)
+    .catch(e => setResult("bad", "Camera blocked", String(e)));
+
+  // Grab the current video frame as a JPEG blob
+  function grabFrame() {
+    canvas.width = video.videoWidth || 640;
+    canvas.height = video.videoHeight || 480;
+    canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
+    return new Promise(res => canvas.toBlob(res, "image/jpeg", 0.9));
+  }
+
+  const COLORS = { match:"var(--ok)", unknown:"var(--warn)", no_face:"var(--bad)",
+                   no_enrolled:"var(--warn)", bad:"var(--bad)" };
+
+  function setResult(status, name, meta) {
+    const pill = document.getElementById("resultPill");
+    pill.textContent = status;
+    pill.style.background = COLORS[status] || "#2a3450";
+    document.getElementById("resultName").textContent = name;
+    document.getElementById("resultMeta").textContent = meta || "";
+  }
+
+  async function enroll() {
+    const pid = document.getElementById("personId").value.trim();
+    if (!pid) { alert("Enter a name/ID first."); return; }
+    const blob = await grabFrame();
+    const fd = new FormData();
+    fd.append("person_id", pid);
+    fd.append("image", blob, "frame.jpg");
+    try {
+      const r = await fetch(`${API}/enroll`, { method:"POST", body:fd });
+      const j = await r.json();
+      if (j.status === "enrolled") {
+        setResult("match", "Enrolled: " + pid, `det_score ${j.det_score} · total ${j.total_enrolled}`);
+        document.getElementById("personId").value = "";
+        loadPeople();
+      } else {
+        setResult("no_face", "No face", j.message || "Could not enroll.");
+      }
+    } catch (e) { setResult("bad", "Error", String(e)); }
+  }
+
+  async function recognize() {
+    const blob = await grabFrame();
+    const fd = new FormData();
+    fd.append("image", blob, "frame.jpg");
+    try {
+      const r = await fetch(`${API}/recognize`, { method:"POST", body:fd });
+      const j = await r.json();
+      if (j.status === "match") {
+        setResult("match", j.person_id, `confidence ${j.confidence}`);
+      } else if (j.status === "unknown") {
+        setResult("unknown", "Unknown", `closest ${j.confidence} (below threshold)`);
+      } else if (j.status === "no_face") {
+        setResult("no_face", "No face", "No face detected in frame.");
+      } else if (j.status === "no_enrolled") {
+        setResult("no_enrolled", "Nobody enrolled", "Enroll someone first.");
+      }
+    } catch (e) { setResult("bad", "Error", String(e)); }
+  }
+
+  async function loadPeople() {
+    try {
+      const r = await fetch(`${API}/people`);
+      const j = await r.json();
+      document.getElementById("count").textContent = j.count;
+      const ul = document.getElementById("people");
+      ul.innerHTML = "";
+      j.person_ids.forEach(pid => {
+        const li = document.createElement("li");
+        li.innerHTML = `<span>${pid}</span>`;
+        const del = document.createElement("button");
+        del.className = "del"; del.textContent = "remove";
+        del.onclick = async () => { await fetch(`${API}/people/${encodeURIComponent(pid)}`, {method:"DELETE"}); loadPeople(); };
+        li.appendChild(del);
+        ul.appendChild(li);
+      });
+    } catch (e) {/* service not up yet */}
+  }
+
+  loadPeople();
+</script>
+</body>
+</html>
